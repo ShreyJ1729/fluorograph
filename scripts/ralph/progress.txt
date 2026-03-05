@@ -7,6 +7,36 @@
 - 898 total rows across splits but only 837 unique protein names (61 duplicates across splits); MAFFT input uses unique names
 - mafft installed via brew (v7.526); alignment width 2680 cols, mean gap fraction ~0.91
 - BioPython (biopython==1.86) installed in .venv; use Bio.SeqIO for FASTA I/O
+- FASTA ID truncation: BioPython rec.id is truncated at first whitespace; use rec.description to get full protein names with spaces (e.g. "mKate M41G S158C")
+- One-hot alphabet: 20 standard AAs (ACDEFGHIKLMNPQRSTVWY) + '-' gap = 21 chars; feature dim = 2680 * 21 = 56280
+- Feature files at features/onehot_{train,val,test}.npz with keys: X (float32), names (object), em_max (float64), ex_max (float64)
+- EGFP chromophore positions 65-67 (raw seq) map to alignment columns 736, 737, 738 — use these for chromophore triplet extraction
+- pd.notna(value) raises pyright error when value is typed as `object`; use explicit None/nan string checks instead
+- Classical features at features/classical_features.csv: 65 columns (name + 64 features); 898 rows, no NaN values
+
+## 2026-03-05 - US-004
+- Implemented scripts/04_classical_features.py: loads all 3 splits + alignment, computes 64 per-protein features, writes features/classical_features.csv
+- Chromophore triplet: EGFP raw positions 65-67 map to alignment cols 736-738; found 31 unique triplets (MYG most common at 159, GYG/TYG ~105 each); all gaps → "unknown"
+- Oligomerization one-hot: m/d/t/wd/other (61 proteins mapped to 'other' due to NaN or rare values like 'td')
+- Switch_type one-hot: b/ps/pa/pc/other (rare values 'o','mp','t' mapped to 'other')
+- Files changed: scripts/04_classical_features.py (created), features/classical_features.csv (generated)
+- **Learnings for future iterations:**
+  - EGFP chromophore alignment columns are 736, 737, 738 (NOT columns 65-67 which are mostly gaps in 2680-wide MSA)
+  - pd.notna() with `object`-typed arg fails pyright; use explicit None/nan string check: `value is None or str(value) in ('nan','none','')`
+  - 31 unique triplets in dataset (not 30); most common: MYG (159), GYG/TYG (~105 each), QYG (98), SYG (81)
+  - Feature count is 64 (not ~30 as PRD estimated); the triplet one-hot alone adds 31 dims
+---
+
+## 2026-03-05 - US-003
+- Implemented scripts/02_onehot_encode.py: loads data/aligned/all.fasta, encodes each protein as flat one-hot vector (alignment_width * 21), writes per-split npz files
+- Key fix: use rec.description (not rec.id) when parsing FASTA — rec.id is truncated at first whitespace, breaking protein names with spaces like "mKate M41G S158C"
+- Files changed: scripts/02_onehot_encode.py (created), features/onehot_train.npz, features/onehot_val.npz, features/onehot_test.npz (generated)
+- **Learnings for future iterations:**
+  - BioPython FASTA parser truncates rec.id at first whitespace; always use rec.description for full headers
+  - Alignment has 824 unique IDs by rec.id but 837 by rec.description (13 names with spaces lose info via rec.id)
+  - Feature matrices: train (628, 56280), val (135, 56280), test (135, 56280); float32 X, object names, float64 em/ex
+  - numpy.savez with allow_pickle=True needed when loading names (object dtype array)
+---
 
 # Ralph Progress Log
 Started: Thu Mar  5 16:29:11 CST 2026
