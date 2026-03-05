@@ -1,0 +1,34 @@
+## Codebase Patterns
+- fpbase_merged.csv lives at project root (/Users/shreyjoshi/fluorograph/fpbase_merged.csv), NOT in data/ — scripts must check both locations
+- Use uv venv + uv pip for package management (system python3 is PEP 668 restricted; brew install blocked)
+- Virtual env at .venv (Python 3.10); activate with: source .venv/bin/activate
+- Typecheck with pyright (requires pandas-stubs for pandas type checking to work correctly)
+- Scripts run from project root: python scripts/XX_name.py
+- 898 total rows across splits but only 837 unique protein names (61 duplicates across splits); MAFFT input uses unique names
+- mafft installed via brew (v7.526); alignment width 2680 cols, mean gap fraction ~0.91
+- BioPython (biopython==1.86) installed in .venv; use Bio.SeqIO for FASTA I/O
+
+# Ralph Progress Log
+Started: Thu Mar  5 16:29:11 CST 2026
+---
+
+## 2026-03-05 - US-002
+- Implemented scripts/01_mafft_align.py: combines all split CSVs into data/aligned/input.fasta (837 unique seqs), runs mafft --auto --thread -1, parses aligned FASTA, prints width (2680) and mean gap fraction (0.9111)
+- Installed mafft via brew (v7.526); installed biopython==1.86 via uv pip
+- Files changed: scripts/01_mafft_align.py (created), data/aligned/input.fasta, data/aligned/all.fasta (generated)
+- **Learnings for future iterations:**
+  - 898 total rows across train/val/test but only 837 unique protein names (61 duplicated names); dedup before writing FASTA to avoid feeding MAFFT identical sequence IDs
+  - mafft stderr goes to terminal naturally; redirect stdout to output file with open() + subprocess.run(stdout=f)
+  - BioPython SeqIO.parse works correctly on MAFFT output; no post-processing needed
+  - Alignment is very gappy (mean gap fraction 0.91) — expected for diverse FP sequences of varying length
+---
+
+## 2026-03-05 - US-001
+- Implemented scripts/00_filter_split.py: filters fpbase_merged.csv to 898 proteins (complete==1, seq_len>=100), assigns em_bin labels across 8 color bins, creates stratified 70/15/15 train/val/test splits using StratifiedShuffleSplit(seed=42)
+- Files changed: scripts/00_filter_split.py (created), data/splits/train.csv, data/splits/val.csv, data/splits/test.csv (generated)
+- **Learnings for future iterations:**
+  - fpbase_merged.csv is at project root, not data/ — script checks both locations
+  - uv venv + uv pip required (system python is PEP 668 locked); venv at .venv with Python 3.10
+  - pyright requires pandas-stubs for zero-error typecheck on pandas code
+  - Split sizes: train=628, val=135, test=135 (all 8 bins in train)
+---
