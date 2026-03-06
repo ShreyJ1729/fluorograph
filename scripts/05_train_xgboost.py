@@ -6,6 +6,7 @@ Train XGBoost models on one-hot or other feature sets.
 
 --mode g0: FPredX replication (one-hot only, 100 Optuna trials)
 --mode g1: Ablation across 6 feature combinations (US-007)
+--modal:   Run on Modal GPU (T4) instead of local CPU
 """
 
 from __future__ import annotations
@@ -250,6 +251,227 @@ def run_g0() -> None:
         )
 
 
+def run_g0_modal() -> None:
+    """G0: FPredX replication with one-hot + XGBoost on Modal GPU."""
+    try:
+        import modal  # type: ignore[import-untyped]
+    except ImportError:
+        print("ERROR: modal not installed. Install with: uv pip install modal")
+        sys.exit(1)
+
+    print("=== G0: FPredX Replication — One-hot XGBoost (Modal GPU) ===\n")
+
+    # Load splits locally
+    X_train, _, em_train, ex_train = load_onehot_split("train")
+    X_val, _, em_val, ex_val = load_onehot_split("val")
+    X_test, _, em_test, ex_test = load_onehot_split("test")
+
+    print(f"Train: {X_train.shape}, Val: {X_val.shape}, Test: {X_test.shape}\n")
+
+    app: Any = modal.App("fluorograph-xgboost")
+    image: Any = modal.Image.debian_slim(python_version="3.10").pip_install(
+        "xgboost", "numpy", "scikit-learn", "optuna"
+    )
+
+    @app.function(gpu="T4", image=image, timeout=1800, serialized=True)  # type: ignore[misc]
+    def _optimize_and_train(
+        X_tr: Any,
+        y_tr: Any,
+        X_vl: Any,
+        y_vl: Any,
+        X_te: Any,
+        y_te: Any,
+        target_name: str,
+        n_trials: int,
+    ) -> dict[str, Any]:
+        """Run Optuna optimization + final training on Modal GPU."""
+        import math as _math
+
+        import numpy as _np
+        import optuna as _optuna
+        import xgboost as _xgb
+        from sklearn.metrics import (
+            mean_absolute_error as _mae,
+            mean_squared_error as _mse,
+            r2_score as _r2,
+        )
+        from sklearn.model_selection import KFold as _KFold
+
+        _optuna.logging.set_verbosity(_optuna.logging.WARNING)
+
+        _X_train = _np.asarray(X_tr, dtype=_np.float32)
+        _y_train = _np.asarray(y_tr, dtype=_np.float64)
+        _X_val = _np.asarray(X_vl, dtype=_np.float32)
+        _y_val = _np.asarray(y_vl, dtype=_np.float64)
+        _X_test = _np.asarray(X_te, dtype=_np.float32)
+        _y_test = _np.asarray(y_te, dtype=_np.float64)
+
+        def _objective(trial: _optuna.Trial) -> float:
+            _n_est = trial.suggest_int("n_estimators", 100, 1000)
+            _params: dict = {
+                "max_depth": trial.suggest_int("max_depth", 3, 10),
+                "learning_rate": trial.suggest_float(
+                    "learning_rate", 0.01, 0.3, log=True
+                ),
+                "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+                "colsample_bytree": trial.suggest_float(
+                    "colsample_bytree", 0.05, 0.5
+                ),
+                "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
+                "reg_alpha": trial.suggest_float(
+                    "reg_alpha", 1e-8, 10.0, log=True
+                ),
+                "reg_lambda": trial.suggest_float(
+                    "reg_lambda", 1e-8, 10.0, log=True
+                ),
+                "tree_method": "hist",
+                "device": "cuda",
+                "verbosity": 0,
+            }
+            _kf = _KFold(n_splits=5, shuffle=True, random_state=42)
+            _maes: list = []
+            for _tr_idx, _vl_idx in _kf.split(_X_train):
+                _dt = _xgb.DMatrix(
+                    _X_train[_tr_idx], label=_y_train[_tr_idx]
+                )
+                _bst = _xgb.train(
+                    _params, _dt, num_boost_round=_n_est, verbose_eval=False
+                )
+                _dv = _xgb.DMatrix(_X_train[_vl_idx])
+                _pred = _bst.predict(_dv)
+                _maes.append(float(_mae(_y_train[_vl_idx], _pred)))
+            return float(_np.mean(_maes))
+
+        print(
+            f"Optimizing {target_name} "
+            f"({n_trials} Optuna trials, 5-fold CV MAE) on GPU..."
+        )
+        _study = _optuna.create_study(direction="minimize")
+        _study.optimize(_objective, n_trials=n_trials)
+        _best_params = dict(_study.best_params)
+        print(f"Best params for {target_name}: {_best_params}")
+
+        # Train final model on full training set
+        _n_estimators = int(_best_params.get("n_estimators", 500))
+        _train_params = {
+            k: v for k, v in _best_params.items() if k != "n_estimators"
+        }
+        _train_params["tree_method"] = "hist"
+        _train_params["device"] = "cuda"
+        _train_params["verbosity"] = 0
+
+        _dtrain = _xgb.DMatrix(_X_train, label=_y_train)
+        print(f"Training final model ({_n_estimators} rounds) on GPU...")
+        _model = _xgb.train(
+            _train_params, _dtrain,
+            num_boost_round=_n_estimators, verbose_eval=False,
+        )
+
+        # Evaluate on val and test
+        _split_metrics: dict = {}
+        for _sname, _Xs, _ys in [
+            ("val", _X_val, _y_val),
+            ("test", _X_test, _y_test),
+        ]:
+            _pred = _model.predict(_xgb.DMatrix(_Xs))
+            _split_metrics[_sname] = {
+                "r2": float(_r2(_ys, _pred)),
+                "mae": float(_mae(_ys, _pred)),
+                "rmse": float(_math.sqrt(float(_mse(_ys, _pred)))),
+            }
+
+        # Serialize model to bytes
+        _model_bytes: bytes = _model.save_raw(raw_format="json")
+
+        return {
+            "best_params": _best_params,
+            "metrics": _split_metrics,
+            "model_bytes": _model_bytes,
+        }
+
+    os.makedirs("models", exist_ok=True)
+    os.makedirs("results", exist_ok=True)
+
+    results: dict[str, Any] = {}
+    best_params_all: dict[str, dict[str, Any]] = {}
+
+    targets: list[tuple[str, FloatArray, FloatArray, FloatArray]] = [
+        ("em_max", em_train, em_val, em_test),
+        ("ex_max", ex_train, ex_val, ex_test),
+    ]
+
+    with modal.enable_output():
+        with app.run():
+            for target_name, y_train, y_val, y_test in targets:
+                print(f"\n--- {target_name} on Modal GPU (T4) ---")
+                result: dict[str, Any] = _optimize_and_train.remote(  # type: ignore[attr-defined]
+                    X_train, y_train, X_val, y_val, X_test, y_test,
+                    target_name, 100,
+                )
+
+                best_params_all[target_name] = result["best_params"]
+                results[target_name] = result["metrics"]
+
+                # Save model locally
+                short = target_name.replace("_max", "")
+                model_path = f"models/xgboost_{short}.json"
+                with open(model_path, "wb") as mf:
+                    mf.write(result["model_bytes"])
+                print(f"Saved model to {model_path}")
+
+    # Save best params
+    with open("models/xgboost_params.json", "w") as f:
+        json.dump(best_params_all, f, indent=2)
+    print("\nSaved models/xgboost_params.json")
+
+    # Load or init metrics.json
+    metrics_path = "results/metrics.json"
+    all_metrics: dict[str, Any] = {}
+    if os.path.exists(metrics_path):
+        with open(metrics_path) as f:
+            all_metrics = json.load(f)
+    all_metrics["g0"] = results
+    with open(metrics_path, "w") as f:
+        json.dump(all_metrics, f, indent=2)
+    print("Saved results/metrics.json\n")
+
+    # Print metrics table
+    print("=== G0 Metrics ===")
+    print(f"{'Target':<10} {'Split':<8} {'R²':>8} {'MAE':>8} {'RMSE':>8}")
+    print("-" * 46)
+    for target in ["em_max", "ex_max"]:
+        for split in ["val", "test"]:
+            m = results[target][split]
+            print(
+                f"{target:<10} {split:<8} {m['r2']:>8.4f} {m['mae']:>8.2f} {m['rmse']:>8.2f}"
+            )
+
+    # G0 gate
+    em_test_r2: float = results["em_max"]["test"]["r2"]
+    ex_test_r2: float = results["ex_max"]["test"]["r2"]
+    em_ref, ex_ref = 0.88, 0.84
+    em_pass = abs(em_test_r2 - em_ref) <= 0.05
+    ex_pass = abs(ex_test_r2 - ex_ref) <= 0.05
+
+    print("\n=== G0 Gate ===")
+    print(
+        f"em_max test R²: {em_test_r2:.4f} (ref {em_ref}, "
+        f"delta {abs(em_test_r2 - em_ref):.4f}) → {'PASS' if em_pass else 'FAIL'}"
+    )
+    print(
+        f"ex_max test R²: {ex_test_r2:.4f} (ref {ex_ref}, "
+        f"delta {abs(ex_test_r2 - ex_ref):.4f}) → {'PASS' if ex_pass else 'FAIL'}"
+    )
+
+    overall = em_pass and ex_pass
+    print(f"\nG0 Overall: {'PASS' if overall else 'FAIL'}")
+    if not overall:
+        print(
+            "NOTE: G0 FAIL — check dataset size, MAFFT flags, "
+            "hyperparameter space, data leakage."
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Train XGBoost models for FluoroGraph"
@@ -260,10 +482,18 @@ def main() -> None:
         required=True,
         help="g0: FPredX replication; g1: ablation across 6 feature sets (US-007)",
     )
+    parser.add_argument(
+        "--modal",
+        action="store_true",
+        help="Run on Modal GPU (T4) instead of local CPU.",
+    )
     args = parser.parse_args()
 
     if args.mode == "g0":
-        run_g0()
+        if args.modal:
+            run_g0_modal()
+        else:
+            run_g0()
     elif args.mode == "g1":
         print("G1 mode not yet implemented (US-007)")
         sys.exit(1)

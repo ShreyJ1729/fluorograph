@@ -143,7 +143,7 @@ def embed_modal(sequences: list[tuple[str, str]]) -> dict[str, np.ndarray]:
         "fair-esm", "torch", "numpy"
     )
 
-    @app.function(gpu="A10G", image=image, timeout=600)  # type: ignore[misc]
+    @app.function(gpu="A10G", image=image, timeout=600, serialized=True)  # type: ignore[misc]
     def _compute_on_gpu(seqs: list[tuple[str, str]]) -> dict[str, list[float]]:
         """Inner function executed on Modal's A10G GPU."""
         import esm  # noqa: PLC0415  # type: ignore[import-untyped]
