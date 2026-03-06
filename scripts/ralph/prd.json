@@ -1,0 +1,186 @@
+{
+  "project": "FluoroGraph",
+  "branchName": "ralph/fluorograph-phase1",
+  "description": "Phase 1: Local spectral prediction pipeline — validated forward model predicting fluorescent protein ex/em maxima from sequence using MAFFT + one-hot + ESM-2 + XGBoost, with interpretability and proper evaluation discipline.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Script 00: Filter and stratified-split dataset",
+      "description": "As a researcher, I need the 898-protein dataset filtered and split into train/val/test so that all downstream scripts have consistent, leakage-free data.",
+      "acceptanceCriteria": [
+        "Create scripts/00_filter_split.py",
+        "Load data/fpbase_merged.csv, filter to complete==1 AND seq_len>=100 (expect ~898 rows)",
+        "Assign em_bin column with 8 bins: blue(<460), cyan(460-499), green(500-529), yellow(530-569), orange(570-599), red(600-649), far-red(650-699), infrared(>=700)",
+        "StratifiedShuffleSplit: test=15% (seed=42), val=15% of remainder (seed=42)",
+        "Write data/splits/train.csv, data/splits/val.csv, data/splits/test.csv",
+        "Print bin distribution per split to stdout; every bin must appear in train",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Implemented. 898 proteins, stratified 628/135/135 train/val/test. All 8 bins present in train."
+    },
+    {
+      "id": "US-002",
+      "title": "Script 01: MAFFT multiple sequence alignment",
+      "description": "As a researcher, I need all 898 sequences aligned with MAFFT so that one-hot positional encoding is position-consistent across proteins.",
+      "acceptanceCriteria": [
+        "Create scripts/01_mafft_align.py",
+        "Combine all 898 sequences from splits into data/aligned/input.fasta (FASTA format)",
+        "Run: mafft --auto --thread -1 data/aligned/input.fasta > data/aligned/all.fasta",
+        "Parse aligned FASTA, print alignment width and mean gap fraction to stdout",
+        "Script exits with clear instructions if mafft binary not found",
+        "Output file data/aligned/all.fasta is written and parseable by BioPython SeqIO",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "Implemented. 837 unique sequences aligned (61 duplicate names deduplicated), alignment width 2680 columns, mean gap fraction 0.9111."
+    },
+    {
+      "id": "US-003",
+      "title": "Script 02: One-hot encode alignment per split",
+      "description": "As a researcher, I need per-split one-hot matrices from the MAFFT alignment so that XGBoost has position-interpretable features for FPredX replication.",
+      "acceptanceCriteria": [
+        "Create scripts/02_onehot_encode.py",
+        "Load data/aligned/all.fasta, determine split membership per protein from data/splits/",
+        "Alphabet: 20 amino acids + '-' gap = 21 chars; map unknown chars to gap",
+        "Per protein: encode (alignment_width x 21) -> flatten to 1D vector",
+        "Write features/onehot_train.npz, features/onehot_val.npz, features/onehot_test.npz",
+        "Each npz has keys: X (float32 matrix), names (str array), em_max (float array), ex_max (float array)",
+        "Print alignment_width and matrix shapes to stdout",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "Implemented. 2680-wide alignment, 21-char alphabet (20 AAs + gap), feature dim 56280. Shapes: train (628, 56280), val (135, 56280), test (135, 56280). Key fix: use rec.description (not rec.id) when parsing FASTA to preserve protein names with spaces."
+    },
+    {
+      "id": "US-004",
+      "title": "Script 04: Classical feature extraction",
+      "description": "As a researcher, I need sequence-derived and FPbase metadata features so that XGBoost ablation models have low-dimensional biochemical signal to compare against one-hot and ESM-2.",
+      "acceptanceCriteria": [
+        "Create scripts/04_classical_features.py",
+        "Compute per protein: 20-dim AA composition (fraction), sequence length, isoelectric point (Bio.SeqUtils.ProtParam), molecular weight",
+        "Identify chromophore triplet at alignment positions ~65-67 (map back to raw seq index); one-hot encode the triplet identity",
+        "One-hot encode oligomerization: m/d/t/wd/other (5-dim)",
+        "One-hot encode switch_type: b/ps/pa/pc/other (5-dim)",
+        "Write features/classical_features.csv with columns: name, and one column per feature (~30 total)",
+        "Print feature count and shape to stdout",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "Implemented. 64 features: 20 AA composition + seq_len + isoelectric_point + molecular_weight + 31 chromophore triplet one-hot (alignment cols 736-738 = EGFP positions 65-67) + 5 oligo + 5 switch_type. 898 proteins, no NaN. Chromophore col discovery: EGFP raw pos 65-67 maps to alignment cols 736-738."
+    },
+    {
+      "id": "US-005",
+      "title": "Script 03: ESM-2 embeddings via Modal GPU",
+      "description": "As a researcher, I need 1280-dim ESM-2 mean-pooled embeddings for all 898 proteins, computed on Modal GPU, so that downstream XGBoost and k-NN models have dense sequence representations.",
+      "acceptanceCriteria": [
+        "Create scripts/03_esm2_embed.py",
+        "Modal function uses esm2_t33_650M_UR50D via fair-esm, runs on A10G GPU",
+        "Process all 898 proteins in batches of 32; extract mean-pooled layer-33 representation: shape (1280,) per protein",
+        "Cache results to features/esm2_embeddings.npz as dict {name: array(1280,)}; skip proteins already present on re-run",
+        "Support --local flag to run on CPU with batch size 4-8 as fallback",
+        "Print progress (proteins processed / total) during run",
+        "features/esm2_embeddings.npz contains embeddings for all 898 proteins after successful run",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "Implemented. Script creates 1280-dim ESM-2 mean-pooled embeddings (esm2_t33_650M_UR50D layer 33) for all 898 proteins. GPU mode uses Modal A10G (~5-10 min, ~$0.50); --local flag falls back to CPU (batch_size=4, ~1-3 hrs). Incremental cache: skips already-embedded proteins. Output: features/esm2_embeddings.npz with keys: names (898,), embeddings (898, 1280)."
+    },
+    {
+      "id": "US-006",
+      "title": "Script 05 (G0): FPredX replication — one-hot XGBoost",
+      "description": "As a researcher, I need to replicate Tam & Zhang 2021 (FPredX) using MAFFT + one-hot + XGBoost so that G0 gate is satisfied and the baseline is established before any enhanced models run.",
+      "acceptanceCriteria": [
+        "Create scripts/05_train_xgboost.py with --mode flag accepting 'g0' and 'g1'",
+        "G0 mode: load features/onehot_train.npz, run Optuna 100 trials minimizing 5-fold CV MAE on train set for both em_max and ex_max",
+        "Evaluate best params on val and test sets; compute R², MAE, RMSE for both targets",
+        "Save models/xgboost_em.json, models/xgboost_ex.json, models/xgboost_params.json",
+        "Append G0 results to results/metrics.json under key 'g0'",
+        "Print G0 metrics table to stdout: target, split, R², MAE, RMSE",
+        "Print PASS/FAIL for G0 gate: R² within 0.05 of FPredX published (em: ~0.88, ex: ~0.84 per Tam & Zhang 2021)",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "G0 MUST pass before running G1. If G0 R² diverges >0.05 from published, stop and debug: dataset size, MAFFT flags, hyperparameter space, data leakage."
+    },
+    {
+      "id": "US-007",
+      "title": "Script 05 (G1): Enhanced XGBoost ablation across 6 feature combinations",
+      "description": "As a researcher, I need XGBoost trained on 6 feature combinations (one-hot, ESM-2, classical, and their concatenations) so that I can identify which feature set achieves R² >= 0.85 on em_max.",
+      "acceptanceCriteria": [
+        "G1 mode in scripts/05_train_xgboost.py trains 6 models: G1a (one-hot only), G1b (ESM-2 only), G1c (classical only), G1d (one-hot+classical), G1e (ESM-2+classical), G1f (one-hot+ESM-2+classical)",
+        "Each model: Optuna 100 trials, 5-fold CV MAE on train, evaluate on val and test",
+        "Features are concatenated directly (XGBoost handles heterogeneous feature types natively, no normalization needed)",
+        "Sanity check: if |test_R2 - val_R2| > 0.05 for any model, print warning 'Possible leakage: investigate'",
+        "Append all G1 results to results/metrics.json under key 'g1' with sub-keys g1a through g1f",
+        "Print comparison table to stdout: model, val_R2_em, test_R2_em, val_MAE_em, test_MAE_em",
+        "Print PASS/FAIL for G1: best test em_max R² >= 0.85",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "Run only after G0 passes. If best R² is 0.80-0.84, report honestly — dataset size and green-class dominance cap performance. Proceed to G2/G3 regardless."
+    },
+    {
+      "id": "US-008",
+      "title": "Script 06: ESM-2 k-NN baseline with ChromaDB",
+      "description": "As a researcher, I need a flat k-NN retrieval baseline using ChromaDB so that I can compare zero-learning retrieval against XGBoost and detect overfitting.",
+      "acceptanceCriteria": [
+        "Create scripts/06_esm2_knn.py",
+        "Create ChromaDB in-memory collection; index train ESM-2 embeddings with metadata: name, em_max, ex_max",
+        "Query each val and test protein for k = 3, 5, 7, 10",
+        "Prediction: distance-weighted average of neighbor em_max and ex_max values",
+        "Select best k on val R²; report that k's results on test",
+        "Compute R², MAE, RMSE per k for both em and ex on val; best-k metrics on test",
+        "Append results to results/metrics.json under key 'knn'",
+        "Print comparison: best-k val R² vs G1 best val R²; note if kNN > XGBoost (potential overfit signal)",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "ChromaDB in-memory (no server). If k-NN beats XGBoost on val, investigate XGBoost for overfitting before proceeding."
+    },
+    {
+      "id": "US-009",
+      "title": "Script 07: Interpretability — XGBoost feature importance mapped to alignment positions",
+      "description": "As a researcher, I need the G0 XGBoost importance scores mapped back to alignment positions so that I can verify >= 50% of top predictive positions match known chromophore-tuning biology.",
+      "acceptanceCriteria": [
+        "Create scripts/07_interpretability.py",
+        "Load G0 XGBoost em_max model and one-hot feature metadata (alignment_position, amino_acid index)",
+        "Extract feature importance by gain; map feature index -> (alignment_position, amino_acid)",
+        "Aggregate gain by alignment_position (sum across amino acids); rank top 30 positions",
+        "Cross-reference top 20 positions against known EGFP tuning residues: 65-67 (chromophore triad), Thr203 (pos ~203), His148 (~148), Glu222 (~222), Arg96 (~96), Phe64 (~64), Asn146 (~146), Met163 (~163)",
+        "Print: fraction of top 20 overlapping known positions; PASS if >= 50%",
+        "Per-color analysis: train separate XGBoost on green-only subset (em_bin=green) and red-only (em_bin=red); print top-10 positions per color",
+        "Write results/feature_importance.csv: columns alignment_position, total_gain, rank",
+        "Save results/figures/feature_importance_top30.png: horizontal bar chart, top 30 positions by gain",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "Uses G0 model (one-hot features only) because one-hot indices map directly to alignment positions. If < 25% overlap with known positions, suspect overfitting."
+    },
+    {
+      "id": "US-010",
+      "title": "Script 08: Generate Phase 1 report",
+      "description": "As a researcher, I need a self-contained markdown report compiling all Phase 1 results so that the pipeline run is documented with metrics, figures, and honest assessment.",
+      "acceptanceCriteria": [
+        "Create scripts/08_report.py",
+        "Load results/metrics.json; load results/feature_importance.csv",
+        "Write results/phase1_report.md with sections: Dataset summary (898 proteins, split sizes, bin distribution), G0 vs FPredX comparison table (R²/MAE/RMSE, PASS/FAIL), G1 ablation comparison table (all 6 models, val + test R²/MAE), k-NN baseline table (all k values, best-k test metrics), Interpretability (top 20 positions, % overlap with known biology, PASS/FAIL), Per-color R² breakdown, Figure references (pred_vs_actual, feature_importance plots)",
+        "Include honest assessment section: note if G1 < 0.85 and likely causes (dataset size, green dominance)",
+        "Report prints 'Phase 1 report written to results/phase1_report.md' on success",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "Run last. Report is a deliverable regardless of whether G1 meets 0.85 threshold — honest null results are valid."
+    }
+  ]
+}
