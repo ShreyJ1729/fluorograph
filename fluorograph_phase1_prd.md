@@ -15,12 +15,12 @@ Predict fluorescent protein excitation and emission maxima from amino acid seque
 
 ## 2. Goals
 
-| ID | Goal | Gate |
-|----|------|------|
-| G0 | Replicate FPredX (Tam & Zhang 2021): MAFFT alignment + one-hot + XGBoost. R² within 0.05 of published. | Gates all downstream work |
-| G1 | Predict ex/em maxima from sequence, R² ≥ 0.85 (emission), MAE ≤ 15 nm | G0 must pass first |
-| G2 | Interpretability: top predictive positions map to known chromophore-tuning residues (≥ 50% overlap) | G0 must pass first |
-| G3 | Proper train/val/test splits, baselines, no data leakage, reproducible metrics | Runs alongside G1/G2 |
+| ID  | Goal                                                                                                   | Gate                      |
+| --- | ------------------------------------------------------------------------------------------------------ | ------------------------- |
+| G0  | Replicate FPredX (Tam & Zhang 2021): MAFFT alignment + one-hot + XGBoost. R² within 0.05 of published. | Gates all downstream work |
+| G1  | Predict ex/em maxima from sequence, R² ≥ 0.85 (emission), MAE ≤ 15 nm                                  | G0 must pass first        |
+| G2  | Interpretability: top predictive positions map to known chromophore-tuning residues (≥ 50% overlap)    | G0 must pass first        |
+| G3  | Proper train/val/test splits, baselines, no data leakage, reproducible metrics                         | Runs alongside G1/G2      |
 
 ---
 
@@ -29,7 +29,6 @@ Predict fluorescent protein excitation and emission maxima from amino acid seque
 - Modal used ONLY for ESM-2 GPU embedding (script 03); all other scripts run local
 - No ESMFold (skip — sequence-only, no structural contacts in Phase 1)
 - No AlphaFold (Phase 2)
-- No Ralph agent loop
 - No inverse design (Phase 2)
 - No fine-tuning of ESM-2
 - No wet-lab or QM/MM validation
@@ -90,29 +89,32 @@ fluorograph/
 ## 5. Data
 
 ### Source Files (present)
+
 - `fpbase_proteins.csv` — 1,110 rows: Name, State, Ex max (nm), Em max (nm), spectral metadata
 - `sequences.json` — 1,040 entries: uuid, name, seq, states[], doi
 - `fpbase_merged.csv` — already built by `merge_dataset.py`
 
 ### Merged Dataset (already built)
+
 - 1,110 rows total, 899 complete (seq + ex_max + em_max), 898 after seq-length filter (≥100 aa)
 - Columns: name, uuid, slug, state, seq, seq_len, ex_max, em_max, stokes_shift, ext_coeff, qy, brightness, pka, oligomerization, maturation, lifetime, mw_kda, year, switch_type, aliases, doi, pdb, has_seq, has_ex_em, complete
 
 ### Splits (built by script 00)
+
 - Filter: `complete == 1` AND `seq_len >= 100` → 898 proteins
 - Strategy: stratified by emission bin, seed=42
 - Sizes: train=629, val=135, test=135 (approximately 70/15/15 — rounding depends on bin sizes)
 
-| Bin | Range | ~Count (of 898) |
-|-----|-------|-----------------|
-| blue | < 460 nm | ~35 |
-| cyan | 460-499 nm | ~98 |
-| green | 500-529 nm | ~410 |
-| yellow | 530-569 nm | ~36 |
-| orange | 570-599 nm | ~98 |
-| red | 600-649 nm | ~99 |
-| far-red | 650-699 nm | ~38 |
-| infrared | ≥ 700 nm | ~24 |
+| Bin      | Range      | ~Count (of 898) |
+| -------- | ---------- | --------------- |
+| blue     | < 460 nm   | ~35             |
+| cyan     | 460-499 nm | ~98             |
+| green    | 500-529 nm | ~410            |
+| yellow   | 530-569 nm | ~36             |
+| orange   | 570-599 nm | ~98             |
+| red      | 600-649 nm | ~99             |
+| far-red  | 650-699 nm | ~38             |
+| infrared | ≥ 700 nm   | ~24             |
 
 **Rule:** test set is locked after creation. Never examine test metrics during model development. Val is the only feedback during tuning.
 
@@ -121,6 +123,7 @@ fluorograph/
 ## 6. Pipeline Scripts (Execution Order)
 
 ### Script 00: Filter + Split
+
 `scripts/00_filter_split.py`
 
 - Load `fpbase_merged.csv`, filter: `complete == 1` AND `seq_len >= 100`
@@ -131,6 +134,7 @@ fluorograph/
 - Print bin distribution per split — verify each bin appears in train
 
 ### Script 01: MAFFT Alignment
+
 `scripts/01_mafft_align.py`
 
 - Combine all 898 sequences into `data/aligned/input.fasta`
@@ -139,6 +143,7 @@ fluorograph/
 - Requires MAFFT: `brew install mafft` or `conda install -c bioconda mafft`
 
 ### Script 02: One-Hot Encoding
+
 `scripts/02_onehot_encode.py`
 
 - Load `data/aligned/all.fasta`, look up split membership per protein
@@ -147,6 +152,7 @@ fluorograph/
 - Write: `features/onehot_{train,val,test}.npz` with keys `X`, `names`, `em_max`, `ex_max`
 
 ### Script 03: ESM-2 Embeddings (Modal GPU)
+
 `scripts/03_esm2_embed.py`
 
 - Model: `esm2_t33_650M_UR50D` via `fair-esm`
@@ -158,9 +164,11 @@ fluorograph/
 - Fallback: if Modal unavailable, set `--local` flag to run on CPU (batch size 4-8, ~1-3 hrs)
 
 ### Script 04: Classical Features
+
 `scripts/04_classical_features.py`
 
 Sequence-derived features:
+
 - 20-dim AA composition (fraction of each amino acid)
 - Sequence length
 - Isoelectric point (`Bio.SeqUtils.ProtParam`)
@@ -168,17 +176,20 @@ Sequence-derived features:
 - Chromophore triplet identity (residues at alignment positions ~65-67, mapped back to raw index; one-hot encode the triplet)
 
 FPbase metadata features:
+
 - Oligomerization (one-hot: m / d / t / wd / other)
 - Switch type (one-hot: b / ps / pa / pc / other)
 
 Total: ~30 features. Write: `features/classical_features.csv`
 
 ### Script 05: Train XGBoost
+
 `scripts/05_train_xgboost.py`
 
 Two modes — run G0 first, verify it passes before running G1:
 
 **G0 — FPredX replication (one-hot only):**
+
 - Features: one-hot matrix (train set)
 - Optuna: 100 trials, minimize 5-fold CV MAE on train
 - Evaluate on val, then test
@@ -188,14 +199,14 @@ Two modes — run G0 first, verify it passes before running G1:
 **G1 — Enhanced (ablation over feature combinations):**
 XGBoost handles heterogeneous concatenated features natively — no normalization needed between one-hot, ESM-2, and classical. Train separate models for each combination to identify what helps:
 
-| Model | Features | Dim (approx) |
-|-------|----------|--------------|
-| G1a | One-hot only (= G0) | alignment_width × 21 |
-| G1b | ESM-2 only | 1280 |
-| G1c | Classical only | ~30 |
-| G1d | One-hot + classical | alignment_width × 21 + ~30 |
-| G1e | ESM-2 + classical | 1280 + ~30 |
-| G1f | **One-hot + ESM-2 + classical** (full concat) | alignment_width × 21 + 1280 + ~30 |
+| Model | Features                                      | Dim (approx)                      |
+| ----- | --------------------------------------------- | --------------------------------- |
+| G1a   | One-hot only (= G0)                           | alignment_width × 21              |
+| G1b   | ESM-2 only                                    | 1280                              |
+| G1c   | Classical only                                | ~30                               |
+| G1d   | One-hot + classical                           | alignment_width × 21 + ~30        |
+| G1e   | ESM-2 + classical                             | 1280 + ~30                        |
+| G1f   | **One-hot + ESM-2 + classical** (full concat) | alignment_width × 21 + 1280 + ~30 |
 
 Same Optuna protocol per model. Compare val R² across all. Report best on test.
 
@@ -204,6 +215,7 @@ Same Optuna protocol per model. Compare val R² across all. Report best on test.
 Sanity check: `|test_R2 - val_R2| > 0.05` → flag and investigate leakage.
 
 ### Script 06: ESM-2 k-NN Baseline
+
 `scripts/06_esm2_knn.py`
 
 - ChromaDB in-memory collection (no server)
@@ -214,6 +226,7 @@ Sanity check: `|test_R2 - val_R2| > 0.05` → flag and investigate leakage.
 - Best k selected on val, reported on test
 
 ### Script 07: Interpretability
+
 `scripts/07_interpretability.py`
 
 - Load G0 XGBoost em_max model (one-hot features — directly position-interpretable)
@@ -225,6 +238,7 @@ Sanity check: `|test_R2 - val_R2| > 0.05` → flag and investigate leakage.
 - Write: `results/feature_importance.csv`, `results/figures/feature_importance_top30.png`
 
 ### Script 08: Report
+
 `scripts/08_report.py`
 
 - Load `results/metrics.json`
@@ -272,6 +286,7 @@ Modal: account with GPU access. Only used for script 03 (ESM-2 embeddings).
 ### Experiment 1: Enhanced Prediction (G1)
 
 **Ablation across 6 feature combinations (script 05) + k-NN baseline (script 06):**
+
 - G1a: One-hot only (= G0, already done)
 - G1b: ESM-2 only (XGBoost on 1280-dim)
 - G1c: Classical only (~30-dim)
@@ -305,33 +320,33 @@ All use same Optuna protocol. Concatenation is straightforward — XGBoost trees
 
 ## 9. Success Metrics
 
-| Goal | Metric | Target | Hard Fail |
-|------|--------|--------|-----------|
-| G0 | em_max R² vs FPredX | Within 0.05 | > 0.05: stop |
-| G0 | ex_max R² vs FPredX | Within 0.05 | > 0.05: stop |
-| G1 | em_max R² (test) | ≥ 0.85 | < 0.75: investigate |
-| G1 | em_max MAE (test) | ≤ 15 nm | > 25 nm: investigate |
-| G1 | ex_max R² (test) | ≥ 0.80 | — |
-| G2 | Top-20 overlap with known positions | ≥ 50% | < 25%: suspect overfit |
-| G3 | Test never used for tuning | Confirmed | Any leakage: invalid |
-| G3 | Stratified splits, seed=42 logged | Confirmed | — |
+| Goal | Metric                              | Target      | Hard Fail              |
+| ---- | ----------------------------------- | ----------- | ---------------------- |
+| G0   | em_max R² vs FPredX                 | Within 0.05 | > 0.05: stop           |
+| G0   | ex_max R² vs FPredX                 | Within 0.05 | > 0.05: stop           |
+| G1   | em_max R² (test)                    | ≥ 0.85      | < 0.75: investigate    |
+| G1   | em_max MAE (test)                   | ≤ 15 nm     | > 25 nm: investigate   |
+| G1   | ex_max R² (test)                    | ≥ 0.80      | —                      |
+| G2   | Top-20 overlap with known positions | ≥ 50%       | < 25%: suspect overfit |
+| G3   | Test never used for tuning          | Confirmed   | Any leakage: invalid   |
+| G3   | Stratified splits, seed=42 logged   | Confirmed   | —                      |
 
 ---
 
 ## 10. Compute Budget
 
-| Step | Time | Where |
-|------|------|-------|
-| Script 00 (filter, split) | < 1 min | Local |
-| Script 01 (MAFFT alignment, 898 seqs) | 5-15 min | Local |
-| Script 02 (one-hot encoding) | < 1 min | Local |
-| Script 03 (ESM-2 embeddings, 898 proteins) | 5-10 min | Modal GPU |
-| Script 04 (classical features) | < 2 min | Local |
-| Script 05 (XGBoost + Optuna, 100 trials × 6 models) | 30-90 min | Local |
-| Script 06 (k-NN eval) | < 5 min | Local |
-| Script 07 (interpretability) | < 5 min | Local |
-| Script 08 (report) | < 1 min | Local |
-| **Total** | **~1-2 hours** | |
+| Step                                                | Time           | Where     |
+| --------------------------------------------------- | -------------- | --------- |
+| Script 00 (filter, split)                           | < 1 min        | Local     |
+| Script 01 (MAFFT alignment, 898 seqs)               | 5-15 min       | Local     |
+| Script 02 (one-hot encoding)                        | < 1 min        | Local     |
+| Script 03 (ESM-2 embeddings, 898 proteins)          | 5-10 min       | Modal GPU |
+| Script 04 (classical features)                      | < 2 min        | Local     |
+| Script 05 (XGBoost + Optuna, 100 trials × 6 models) | 30-90 min      | Local     |
+| Script 06 (k-NN eval)                               | < 5 min        | Local     |
+| Script 07 (interpretability)                        | < 5 min        | Local     |
+| Script 08 (report)                                  | < 1 min        | Local     |
+| **Total**                                           | **~1-2 hours** |           |
 
 ESM-2 embeddings are cached locally — re-runs skip already-processed proteins.
 Modal cost for script 03: ~$0.50 (A10G, 10 min).
@@ -359,13 +374,13 @@ python scripts/08_report.py
 
 ## 12. Risks and Mitigations
 
-| Risk | Mitigation |
-|------|-----------|
-| MAFFT not installed | `brew install mafft`. Script exits with install instructions. |
-| ESM-2 OOM on Modal | Reduce batch to 16. If Modal unavailable, run local CPU with `--local` flag (batch 4-8, ~1-3 hrs). |
-| G0 diverges from paper | Debug: dataset size, MAFFT flags, whether paper uses CV vs held-out test. |
-| Green-class dominance (411/898) | Stratified splits. Per-color breakdown reveals underperforming bins. |
-| ESM-2 doesn't beat one-hot | Legitimate finding. Report honestly. Interpretability still complete. |
+| Risk                            | Mitigation                                                                                         |
+| ------------------------------- | -------------------------------------------------------------------------------------------------- |
+| MAFFT not installed             | `brew install mafft`. Script exits with install instructions.                                      |
+| ESM-2 OOM on Modal              | Reduce batch to 16. If Modal unavailable, run local CPU with `--local` flag (batch 4-8, ~1-3 hrs). |
+| G0 diverges from paper          | Debug: dataset size, MAFFT flags, whether paper uses CV vs held-out test.                          |
+| Green-class dominance (411/898) | Stratified splits. Per-color breakdown reveals underperforming bins.                               |
+| ESM-2 doesn't beat one-hot      | Legitimate finding. Report honestly. Interpretability still complete.                              |
 
 ---
 
